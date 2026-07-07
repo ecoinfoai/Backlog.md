@@ -22,21 +22,13 @@
         #
         # Using an overlay to replace the Bun package maintains full compatibility
         # with the standard Bun package structure (thanks to @erdosxx for this solution).
+        # Fork change: use standard nixpkgs Bun (>= 1.3.5) so the interactive
+        # editor can use Bun's PTY (`terminal`) API and avoid input lag. The
+        # upstream baseline overlay pinned Bun 1.2.23 for older CPUs without
+        # AVX2; this fork targets an AVX2 machine and does not need it.
         pkgs = import nixpkgs {
           inherit system;
-          overlays = if system == "x86_64-linux" then
-            let bunVersion = "1.2.23"; in [
-              (final: prev: {
-                bun = prev.bun.overrideAttrs (oldAttrs: {
-                  src = prev.fetchurl {
-                    url = "https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-baseline.zip";
-                    sha256 = "017f89e19e1b40aa4c11a7cf671d3990cb51cc12288a43473238a019a8cafffc";
-                  };
-                });
-              })
-            ]
-          else
-            [];
+          overlays = [];
         };
 
         # Read version from package.json

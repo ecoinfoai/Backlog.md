@@ -75,27 +75,72 @@ export async function isEditorAvailable(editor: string): Promise<boolean> {
 
 /**
  * Open a file in the editor
+ *
+ * When attached to a real terminal, the editor is spawned with a pseudo-terminal
+ * (Bun's `terminal` option) and stdin is forwarded in raw mode. This avoids the
+ * input lag and dropped keystrokes that occur when interactive editors are run
+ * with `stdin: "inherit"` under Bun (the parent keeps polling the shared TTY).
+ * In non-interactive contexts (no TTY) it falls back to inherited stdio.
  */
 export async function openInEditor(filePath: string, config?: BacklogConfig | null): Promise<boolean> {
 	const editor = resolveEditor(config);
 
-	try {
-		// Split the editor command in case it has arguments
-		const parts = editor.split(" ");
-		const command = parts[0] ?? editor;
-		const args = [...parts.slice(1), filePath];
+	// Split the editor command in case it has arguments
+	const parts = editor.split(" ");
+	const command = parts[0] ?? editor;
+	const args = [...parts.slice(1), filePath];
 
-		// Use Bun.spawn with explicit stdio inheritance for interactive editors
-		// Interactive editors like vim/neovim require direct access to stdin/stdout/stderr
-		// to properly render their UI and receive user input
-		const subprocess = Bun.spawn([command, ...args], {
-			stdin: "inherit",
-			stdout: "inherit",
-			stderr: "inherit",
+	const stdin = process.stdin;
+	const stdout = process.stdout;
+	const interactive = Boolean(stdout.isTTY && stdin.isTTY && typeof stdin.setRawMode === "function");
+
+	// Non-interactive fallback (piped/headless): inherited stdio is fine here and
+	// avoids setRawMode on a non-TTY, which would throw.
+	if (!interactive) {
+		try {
+			const subprocess = Bun.spawn([command, ...args], {
+				stdin: "inherit",
+				stdout: "inherit",
+				stderr: "inherit",
+			});
+			return (await subprocess.exited) === 0;
+		} catch (error) {
+			console.error(`Failed to open editor: ${error}`);
+			return false;
+		}
+	}
+
+	try {
+		const proc = Bun.spawn([command, ...args], {
+			terminal: {
+				cols: stdout.columns ?? 80,
+				rows: stdout.rows ?? 24,
+				data(_term: unknown, data: Uint8Array) {
+					stdout.write(data);
+				},
+			},
 		});
 
-		const exitCode = await subprocess.exited;
-		return exitCode === 0;
+		const term = (proc as unknown as { terminal?: { write(d: Uint8Array): void; resize(c: number, r: number): void } })
+			.terminal;
+
+		const onResize = () => term?.resize(stdout.columns ?? 80, stdout.rows ?? 24);
+		const onData = (chunk: Uint8Array) => term?.write(chunk);
+
+		const wasRaw = Boolean(stdin.isRaw);
+		stdin.setRawMode(true);
+		stdin.resume();
+		stdin.on("data", onData);
+		stdout.on("resize", onResize);
+
+		try {
+			return (await proc.exited) === 0;
+		} finally {
+			stdin.off("data", onData);
+			stdout.off("resize", onResize);
+			if (!wasRaw) stdin.setRawMode(false);
+			stdin.pause();
+		}
 	} catch (error) {
 		console.error(`Failed to open editor: ${error}`);
 		return false;
